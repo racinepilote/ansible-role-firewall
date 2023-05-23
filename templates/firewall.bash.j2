@@ -15,7 +15,7 @@
 #
 # @author Jeff Geerling
 
-# No spoofing.
+# No spoofing. Enable source address spoofing protection
 if [ -e /proc/sys/net/ipv4/conf/all/rp_filter ]
 then
 for filter in /proc/sys/net/ipv4/conf/*/rp_filter
@@ -24,10 +24,20 @@ echo 1 > $filter
 done
 fi
 
-# Set the default rules.
-iptables -P INPUT ACCEPT
-iptables -P FORWARD ACCEPT
-iptables -P OUTPUT ACCEPT
+# Drop source routed packets
+echo 0 > /proc/sys/net/ipv4/conf/all/accept_source_route
+
+# Enable TCP SYN cookie protection from SYN floods
+echo 1 > /proc/sys/net/ipv4/tcp_syncookies
+
+# Don't accept ICMP redirect messages
+echo 0 > /proc/sys/net/ipv4/conf/all/accept_redirects
+
+# Don't send ICMP redirect messages
+echo 0 > /proc/sys/net/ipv4/conf/all/send_redirect
+
+# Log packets with impossible source addresses
+echo 1 > /proc/sys/net/ipv4/conf/all/log_martians
 
 {% if firewall_flush_rules_and_chains %}
 # Remove all rules and chains.
@@ -39,6 +49,12 @@ iptables -X
 
 # Accept traffic from loopback interface (localhost).
 iptables -A INPUT -i lo -j ACCEPT
+iptables -A OUTPUT -o lo -j ACCEPT
+
+# Set the default rules.
+iptables -P INPUT ACCEPT
+iptables -P FORWARD ACCEPT
+iptables -P OUTPUT ACCEPT
 
 # Forwarded ports.
 {# Add a rule for each forwarded port #}
@@ -50,6 +66,10 @@ iptables -t nat -I OUTPUT -p tcp -o lo --dport {{ forwarded_port.src }} -j REDIR
 iptables -t nat -I PREROUTING -p udp --dport {{ forwarded_port.src }} -j REDIRECT --to-port {{ forwarded_port.dest }}
 iptables -t nat -I OUTPUT -p udp -o lo --dport {{ forwarded_port.src }} -j REDIRECT --to-port {{ forwarded_port.dest }}
 {% endfor %}
+
+iptables -A INPUT -p tcp --dport {{ firewall_allowed_tcp_ssh }} -m state --state NEW -m recent --update --seconds 60 --hitcount 4 -j DROP
+iptables -A INPUT -p tcp --dport {{ firewall_allowed_tcp_ssh }} -m state --state NEW -m recent --set
+iptables -A INPUT -p tcp --dport {{ firewall_allowed_tcp_ssh }} -m state --state NEW -j ACCEPT
 
 # Open ports.
 {# Add a rule for each open port #}
@@ -72,8 +92,11 @@ iptables -A INPUT -p udp --sport 123 -j ACCEPT
 {{ rule }}
 {% endfor %}
 
-# Allow established connections:
+# Previously initiated and accepted exchanges bypass rule checking
+# Allow unlimited outbound traffic
 iptables -A INPUT -m state --state ESTABLISHED,RELATED -j ACCEPT
+iptables -A OUTPUT -m state --state NEW,ESTABLISHED,RELATED -j ACCEPT
+
 
 # Log EVERYTHING (ONLY for Debug).
 # iptables -A INPUT -j LOG
@@ -96,8 +119,8 @@ if [ -x "$(which ip6tables 2>/dev/null)" ]; then
   ip6tables -X
 {% endif %}
 
-  # Accept traffic from loopback interface (localhost).
-  ip6tables -A INPUT -i lo -j ACCEPT
+# Accept traffic from loopback interface (localhost).
+ip6tables -A INPUT -i lo -j ACCEPT
 
   # Open ports.
 {# Add a rule for each open port #}
